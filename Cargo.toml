@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ghostwalk-dom",
+    "crates/ghostwalk-net",
+    "crates/ghostwalk-js",
+    "crates/ghostwalk-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/DhanushNehru/ghostwalk"
+rust-version = "1.85"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,16 @@
+[package]
+name = "ghostwalk-cli"
+description = "ghostwalk command line: fetch, parse, run inline JS, dump the result"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ghostwalk"
+path = "src/main.rs"
+
+[dependencies]
+ghostwalk-dom = { path = "../ghostwalk-dom" }
+ghostwalk-net = { path = "../ghostwalk-net" }
+ghostwalk-js = { path = "../ghostwalk-js" }

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ghostwalk demo page</title>
+  <style>body { font-family: sans-serif; }</style>
+</head>
+<body>
+  <header>
+    <h1 id="app">Hello from ghostwalk</h1>
+    <nav>
+      <a href="https://github.com/DhanushNehru/ghostwalk">Project repository</a>
+      <a href="https://example.com/docs">Documentation</a>
+    </nav>
+  </header>
+
+  <main>
+    <p class="intro">This page is parsed into a <strong>flat arena DOM</strong>,
+    its inline scripts run in a bounded engine, and the result is dumped
+    as a tree, text, or Markdown.</p>
+
+    <h2>Why agents care</h2>
+    <ul>
+      <li>Semantic <em>Markdown</em> straight from the DOM</li>
+      <li>No Chromium, no GPU, tiny footprint</li>
+      <li>Every fetch has a byte ceiling and a timeout</li>
+    </ul>
+
+    <h2>A table</h2>
+    <table>
+      <tr><th>Stage</th><th>Owner crate</th></tr>
+      <tr><td>Parse</td><td>ghostwalk-dom</td></tr>
+      <tr><td>Fetch</td><td>ghostwalk-net</td></tr>
+      <tr><td>Script</td><td>ghostwalk-js</td></tr>
+    </table>
+
+    <blockquote>Light as gossamer, structured as a loom.</blockquote>
+
+    <pre><code>ghostwalk https://example.com --dump md</code></pre>
+
+    <img src="logo.png" alt="ghostwalk logo">
+  </main>
+
+  <footer>
+    <p id="status">JS has not run yet.</p>
+  </footer>
+
+  <!-- external scripts are skipped in the MVP -->
+  <script src="https://example.com/ignored.js"></script>
+
+  <script>
+    console.log("demo script starting");
+    document.title = "ghostwalk demo (modified by JS)";
+    var status = document.querySelector("#status");
+    status.textContent = "JS ran and mutated this DOM.";
+    status.setAttribute("data-state", "ready");
+  </script>
+
+  <script>
+    var app = document.querySelector("#app");
+    console.log("h1 tag is " + app.tagName + ", text: " + app.textContent);
+    console.log("paragraph count: " + document.querySelectorAll("p").length);
+    console.log("status data-state: " + document.querySelector("#status").getAttribute("data-state"));
+  </script>
+
+  <script type="text/template">
+    this is not JavaScript and must not run ((( )))
+  </script>
+</body>
+</html>
