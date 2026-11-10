@@ -1,0 +1,11 @@
+[package]
+name = "ghostwalk-js"
+description = "JavaScript runtime and DOM bridge for the ghostwalk engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+boa_engine = "0.22"
+ghostwalk-dom = { path = "../ghostwalk-dom" }

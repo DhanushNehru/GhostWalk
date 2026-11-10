@@ -1,0 +1,13 @@
+[package]
+name = "ghostwalk-dom"
+description = "Flat arena DOM with an html5ever tree-builder sink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+html5ever = "0.40"
+markup5ever = "0.40"
+xml5ever = "0.40"
+tendril = "0.5"

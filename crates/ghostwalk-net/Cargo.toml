@@ -1,0 +1,11 @@
+[package]
+name = "ghostwalk-net"
+description = "Bounded HTTP fetching for the ghostwalk engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ureq = "3"
+thiserror = "2"
