@@ -2,7 +2,7 @@
 
 A data-oriented headless web engine in Rust, built for AI agents, scraping, and automation.
 
-GhostWalk fetches a page, parses it into a **flat arena DOM** (no pointer-chasing, no borrow-checker fights), runs its inline JavaScript in a bounded, sandboxed engine, and hands agents what they actually want: the DOM tree, readable text, or **semantic Markdown** - at a fraction of headless Chromium's cost.
+GhostWalk fetches a page, parses it into a **flat arena DOM** (no pointer-chasing, no borrow-checker fights), runs its inline JavaScript in a bounded engine, and hands agents what they actually want: the DOM tree, readable text, or **semantic Markdown** - at a fraction of headless Chromium's cost.
 
 > Status: **working MVP**. The fetch -> parse -> execute-inline-JS -> dump pipeline runs today (see below). Style, layout, rendering, CDP and MCP are designed and roadmapped - see [ARCHITECTURE.md](ARCHITECTURE.md) and [ROADMAP.md](ROADMAP.md). Contributions welcome: check the [open issues](../../issues).
 
