@@ -235,7 +235,8 @@ fn main() -> ExitCode {
     }
     let t_js = Instant::now();
 
-    // 4. Dump.
+    // 4. Reclaim detached nodes after scripts release their handles, then dump.
+    dom.borrow_mut().compact();
     {
         let dom = dom.borrow();
         match args.dump {
