@@ -32,7 +32,7 @@ use boa_engine::{
     js_string, Context, JsError, JsNativeError, JsResult, JsString, JsValue, NativeFunction,
     Source,
 };
-use ghostwalk_dom::{Dom, NodeId};
+use ghostwalk_dom::{Dom, InvalidNodeId, NodeId};
 
 /// One captured `console.*` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +311,10 @@ fn install_document(ctx: &mut Context, dom: Rc<RefCell<Dom>>) -> Result<(), JsEr
 // element handles
 // ---------------------------------------------------------------------------
 
+fn stale_node_error(error: InvalidNodeId) -> JsError {
+    JsNativeError::typ().with_message(error.to_string()).into()
+}
+
 /// A live handle to one arena node, exposed to JS as a plain object.
 /// Reads and writes go straight to the Rust arena through the captured
 /// `Rc<RefCell<Dom>>`.
@@ -326,7 +330,9 @@ fn element_object(ctx: &mut Context, dom: Rc<RefCell<Dom>>, id: NodeId) -> JsVal
         let dom = dom.clone();
         unsafe {
             NativeFunction::from_closure(move |_this, _args, _ctx| {
-                let text = dom.borrow().text_content(id);
+                let dom = dom.borrow();
+                dom.try_node(id).map_err(stale_node_error)?;
+                let text = dom.text_content(id);
                 Ok(JsValue::from(JsString::from(text)))
             })
         }
@@ -336,7 +342,9 @@ fn element_object(ctx: &mut Context, dom: Rc<RefCell<Dom>>, id: NodeId) -> JsVal
         unsafe {
             NativeFunction::from_closure(move |_this, args, ctx| {
                 let value = selector_arg(args, ctx)?;
-                dom.borrow_mut().set_text_content(id, &value);
+                let mut dom = dom.borrow_mut();
+                dom.try_node(id).map_err(stale_node_error)?;
+                dom.set_text_content(id, &value);
                 Ok(JsValue::undefined())
             })
         }
@@ -346,7 +354,9 @@ fn element_object(ctx: &mut Context, dom: Rc<RefCell<Dom>>, id: NodeId) -> JsVal
         unsafe {
             NativeFunction::from_closure(move |_this, args, ctx| {
                 let name = selector_arg(args, ctx)?;
-                match dom.borrow().attr(id, &name) {
+                let dom = dom.borrow();
+                dom.try_node(id).map_err(stale_node_error)?;
+                match dom.attr(id, &name) {
                     Some(v) => Ok(JsValue::from(JsString::from(v))),
                     None => Ok(JsValue::null()),
                 }
@@ -364,7 +374,9 @@ fn element_object(ctx: &mut Context, dom: Rc<RefCell<Dom>>, id: NodeId) -> JsVal
                     .transpose()?
                     .map(|s| s.to_std_string_escaped())
                     .unwrap_or_default();
-                dom.borrow_mut().set_attr(id, &name, &value);
+                let mut dom = dom.borrow_mut();
+                dom.try_node(id).map_err(stale_node_error)?;
+                dom.set_attr(id, &name, &value);
                 Ok(JsValue::undefined())
             })
         }
@@ -427,6 +439,32 @@ mod tests {
         let out = rt.take_console_output();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].message, "hello 2");
+    }
+
+    #[test]
+    fn detached_js_handle_throws_after_compaction() {
+        let (mut rt, dom) = runtime("<main><p>old</p></main>");
+        rt.run_script(
+            "const saved = document.querySelector('p');\
+             document.querySelector('main').textContent = 'new';\
+             if (saved.textContent !== 'old') throw Error('detached handle changed');",
+        )
+        .unwrap();
+        assert_eq!(dom.borrow_mut().compact(), 2);
+
+        for script in [
+            "saved.textContent",
+            "saved.textContent = 'wrong'",
+            "saved.getAttribute('id')",
+            "saved.setAttribute('id', 'wrong')",
+        ] {
+            let error = rt.run_script(script).unwrap_err();
+            assert!(error.to_string().contains("stale DOM node handle"));
+        }
+        rt.run_script(
+            "if (document.querySelector('main').textContent !== 'new') throw Error('mutation leaked');",
+        )
+        .unwrap();
     }
 
     #[test]

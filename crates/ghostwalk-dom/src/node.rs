@@ -1,33 +1,40 @@
 //! Flat arena DOM storage.
 //!
 //! Instead of `Rc`/pointer-linked nodes, every node lives in one
-//! contiguous `Vec<Node>` and is referenced by a compact [`NodeId`].
+//! contiguous arena and is referenced by a compact [`NodeId`].
 //! This keeps allocations cache-friendly, avoids borrow-checker fights,
 //! and is the storage model the rest of the engine builds on.
 //! See ARCHITECTURE.md for the long-term data-oriented plan.
 
 use html5ever::interface::tree_builder::QuirksMode;
 use html5ever::{ns, Attribute, LocalName, QualName};
-use std::num::NonZeroU32;
+use std::fmt;
 
-/// Handle to a node in the arena. 4 bytes, `Copy`, no lifetime.
-///
-/// The arena is append-only: a `NodeId` stays valid for the lifetime
-/// of its [`Dom`]. (Generational validation is on the roadmap.)
+/// Handle to a node in its originating [`Dom`]. Live handles survive compaction.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
-pub struct NodeId(NonZeroU32);
+pub struct NodeId {
+    index: u32,
+    generation: u32,
+}
 
 impl NodeId {
-    pub(crate) fn new(index: usize) -> NodeId {
-        // +1 so index 0 maps to a non-zero value and Option<NodeId> stays 4 bytes.
-        NodeId(NonZeroU32::new((index as u32) + 1).expect("arena index overflow"))
-    }
-
-    /// Position of this node inside the arena.
+    /// Stable slot index. A recycled slot has the same index and a new generation.
     pub fn index(self) -> usize {
-        (self.0.get() - 1) as usize
+        self.index as usize
     }
 }
+
+/// A node handle whose slot is vacant, out of bounds, or has been recycled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidNodeId(NodeId);
+
+impl fmt::Display for InvalidNodeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid or stale DOM node handle {:?}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidNodeId {}
 
 /// Data carried by an element node.
 #[derive(Debug, Clone)]
@@ -39,7 +46,7 @@ pub struct ElementData {
     pub mathml_annotation_xml_integration_point: bool,
 }
 
-/// The payload of one arena slot.
+/// The payload of one arena node.
 #[derive(Debug, Clone)]
 pub enum NodeData {
     Document,
@@ -57,7 +64,7 @@ pub enum NodeData {
     },
 }
 
-/// One node in the arena: intrusive child/sibling links as arena indices.
+/// One node in the arena, with child and sibling links stored as handles.
 #[derive(Debug, Clone)]
 pub struct Node {
     pub parent: Option<NodeId>,
@@ -81,10 +88,24 @@ impl Node {
     }
 }
 
-/// The document: a flat vector of nodes plus document-level state.
+#[derive(Debug)]
+struct Slot {
+    generation: u32,
+    position: Option<usize>,
+}
+
+#[derive(Debug)]
+struct ArenaNode {
+    slot: u32,
+    node: Node,
+}
+
+/// The document: dense node storage, stable handle slots, and document state.
 #[derive(Debug)]
 pub struct Dom {
-    nodes: Vec<Node>,
+    nodes: Vec<ArenaNode>,
+    slots: Vec<Slot>,
+    free_slots: Vec<u32>,
     root: NodeId,
     quirks_mode: QuirksMode,
     parse_error_count: u64,
@@ -98,10 +119,20 @@ impl Default for Dom {
 
 impl Dom {
     pub fn new() -> Self {
-        let nodes = vec![Node::detached(NodeData::Document)];
         Dom {
-            nodes,
-            root: NodeId::new(0),
+            nodes: vec![ArenaNode {
+                slot: 0,
+                node: Node::detached(NodeData::Document),
+            }],
+            slots: vec![Slot {
+                generation: 0,
+                position: Some(0),
+            }],
+            free_slots: Vec::new(),
+            root: NodeId {
+                index: 0,
+                generation: 0,
+            },
             quirks_mode: QuirksMode::NoQuirks,
             parse_error_count: 0,
         }
@@ -128,24 +159,116 @@ impl Dom {
         self.parse_error_count += 1;
     }
 
-    /// Number of slots in the arena (including detached nodes).
+    /// Number of stored nodes, including detached nodes awaiting compaction.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
-    pub fn node(&self, id: NodeId) -> &Node {
-        &self.nodes[id.index()]
+    fn node_position(&self, id: NodeId) -> Result<usize, InvalidNodeId> {
+        match self.slots.get(id.index()) {
+            Some(slot) if slot.generation == id.generation => {
+                slot.position.ok_or(InvalidNodeId(id))
+            }
+            _ => Err(InvalidNodeId(id)),
+        }
     }
 
+    /// Look up a handle, returning an error if the node has been reclaimed.
+    pub fn try_node(&self, id: NodeId) -> Result<&Node, InvalidNodeId> {
+        let position = self.node_position(id)?;
+        Ok(&self.nodes[position].node)
+    }
+
+    /// Look up a mutable node, returning an error if it has been reclaimed.
+    pub fn try_node_mut(&mut self, id: NodeId) -> Result<&mut Node, InvalidNodeId> {
+        let position = self.node_position(id)?;
+        Ok(&mut self.nodes[position].node)
+    }
+
+    /// Look up a live handle. Panics if the handle is invalid.
+    pub fn node(&self, id: NodeId) -> &Node {
+        self.try_node(id)
+            .expect("DOM lookup requires a live handle")
+    }
+
+    /// Look up a mutable node. Panics if the handle is invalid.
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
-        &mut self.nodes[id.index()]
+        self.try_node_mut(id)
+            .expect("DOM lookup requires a live handle")
     }
 
     /// Allocate a new detached node, returning its id.
     pub fn create_node(&mut self, data: NodeData) -> NodeId {
-        let id = NodeId::new(self.nodes.len());
-        self.nodes.push(Node::detached(data));
-        id
+        let position = Some(self.nodes.len());
+        let (index, generation) = if let Some(index) = self.free_slots.pop() {
+            let slot = &mut self.slots[index as usize];
+            slot.generation += 1;
+            slot.position = position;
+            (index, slot.generation)
+        } else {
+            let index = u32::try_from(self.slots.len()).expect("arena index overflow");
+            self.slots.push(Slot {
+                generation: 0,
+                position,
+            });
+            (index, 0)
+        };
+        self.nodes.push(ArenaNode {
+            slot: index,
+            node: Node::detached(data),
+        });
+        NodeId { index, generation }
+    }
+
+    /// Reclaim nodes unreachable from the document, including detached subtrees.
+    ///
+    /// Template contents and their descendants remain live when their template
+    /// is reachable. Handles to surviving nodes stay valid as storage moves.
+    /// Call this when detached nodes are no longer needed for reattachment.
+    /// Returns the number of nodes reclaimed.
+    pub fn compact(&mut self) -> usize {
+        let before = self.nodes.len();
+        let mut reachable = vec![false; before];
+        let mut pending = vec![self.root];
+        while let Some(id) = pending.pop() {
+            let position = self.node_position(id).expect("invalid DOM link");
+            if std::mem::replace(&mut reachable[position], true) {
+                continue;
+            }
+            let node = &self.nodes[position].node;
+            pending.extend(
+                [
+                    node.parent,
+                    node.prev_sibling,
+                    node.next_sibling,
+                    node.first_child,
+                    node.last_child,
+                ]
+                .into_iter()
+                .flatten(),
+            );
+            if let NodeData::Element(el) = &node.data {
+                pending.extend(el.template_contents);
+            }
+        }
+
+        let mut position = 0;
+        self.nodes.retain(|entry| {
+            let slot = &mut self.slots[entry.slot as usize];
+            let keep = reachable[slot.position.expect("stored node has a live slot")];
+            if keep {
+                slot.position = Some(position);
+                position += 1;
+            } else {
+                slot.position = None;
+                // Retire exhausted slots so their generations never wrap.
+                if slot.generation < u32::MAX {
+                    self.free_slots.push(entry.slot);
+                }
+            }
+            keep
+        });
+        before - self.nodes.len()
     }
 
     /// Convenience: create a detached HTML element in the HTML namespace.
@@ -223,6 +346,7 @@ impl Dom {
 
     /// Append `child` as the last child of `parent`, detaching it first.
     pub fn append(&mut self, parent: NodeId, child: NodeId) {
+        self.node_position(parent).expect("invalid parent handle");
         self.detach(child);
         let last = self.node(parent).last_child;
         self.node_mut(child).parent = Some(parent);
@@ -332,8 +456,7 @@ impl Dom {
 
     /// Replace the children of `id` with a single text node.
     ///
-    /// Old child slots stay in the arena (append-only storage); they are
-    /// unreachable garbage until arena compaction lands (roadmap).
+    /// Detached children remain accessible through existing handles until compaction.
     pub fn set_text_content(&mut self, id: NodeId, text: &str) {
         let kids: Vec<NodeId> = self.children(id).collect();
         for kid in kids {
@@ -387,5 +510,70 @@ impl Iterator for Descendants<'_> {
             self.stack.push(kid);
         }
         Some(cur)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{extract, parse_html, select};
+
+    #[test]
+    fn reclaimed_handles_stay_invalid_after_slot_reuse() {
+        let mut dom = Dom::new();
+        let stale = dom.create_html_element("div");
+        dom.append(dom.root(), stale);
+        dom.detach(stale);
+        assert_eq!(dom.tag_name(stale), Some("div"));
+
+        assert_eq!(dom.compact(), 1);
+        assert!(dom.try_node(stale).is_err());
+        assert_eq!(dom.compact(), 0);
+
+        let replacement = dom.create_html_element("p");
+        dom.append(dom.root(), replacement);
+        assert_eq!(stale.index(), replacement.index());
+        assert_ne!(stale, replacement);
+        assert!(dom.try_node(stale).is_err());
+        assert!(dom.try_node_mut(stale).is_err());
+        assert_eq!(dom.tag_name(replacement), Some("p"));
+    }
+
+    #[test]
+    fn compaction_preserves_live_handles_and_document_output() {
+        let mut dom = parse_html(
+            "<main><div id='replace'><template><p>discarded template</p></template><b>old</b></div>\
+             <p id='keep'>Keep <em>this</em></p><template id='live'><p>template contents</p></template></main>",
+        );
+        let replace = select::query_selector(&dom, "#replace").unwrap().unwrap();
+        let kept = select::query_selector(&dom, "#keep").unwrap().unwrap();
+        let discarded = select::query_selector(&dom, "#replace template")
+            .unwrap()
+            .unwrap();
+        let live_template = select::query_selector(&dom, "#live").unwrap().unwrap();
+        let discarded_fragment = dom.element(discarded).unwrap().template_contents.unwrap();
+        let live_fragment = dom
+            .element(live_template)
+            .unwrap()
+            .template_contents
+            .unwrap();
+        dom.set_text_content(replace, "new");
+
+        let kept_position = dom.node_position(kept).unwrap();
+        let before = dom.node_count();
+        let tree = extract::dump_tree(&dom);
+        let text = extract::extract_text(&dom);
+        let markdown = extract::extract_markdown(&dom);
+        assert_eq!(dom.compact(), 6);
+        assert_eq!(dom.node_count(), before - 6);
+        assert!(dom.node_position(kept).unwrap() < kept_position);
+        assert!(dom.try_node(discarded).is_err());
+        assert!(dom.try_node(discarded_fragment).is_err());
+        assert_eq!(dom.text_content(live_fragment), "template contents");
+        assert_eq!(select::query_selector(&dom, "#keep").unwrap(), Some(kept));
+        assert_eq!(dom.text_content(kept), "Keep this");
+        assert_eq!(extract::dump_tree(&dom), tree);
+        assert_eq!(extract::extract_text(&dom), text);
+        assert_eq!(extract::extract_markdown(&dom), markdown);
     }
 }
